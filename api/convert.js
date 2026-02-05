@@ -1,12 +1,10 @@
 export default async function handler(req, res) {
-  // 1. 取得網址並進行解碼，確保特殊字元 (? & =) 不會導致路徑錯誤
   const rawUrl = req.query.url;
   if (!rawUrl) return res.status(400).send('No URL provided');
   
   const decodedUrl = decodeURIComponent(rawUrl);
 
   try {
-    // 2. 模擬瀏覽器 Header，這能防止 Google 回傳錯誤的中繼頁面
     const response = await fetch(decodedUrl, {
       redirect: 'follow',
       headers: {
@@ -14,23 +12,29 @@ export default async function handler(req, res) {
       }
     });
 
+    // 1. 優先檢查最終網址 (URL String) 是否包含座標
     const finalUrl = response.url;
-    console.log("Final URL fetched:", finalUrl); // 你可以在 Vercel 的 Logs 看到這個輸出
+    const urlRegex = /(-?\d+\.\d+)[,!][34]?d?(-?\d+\.\d+)/;
+    let match = finalUrl.match(urlRegex);
 
-    // 3. 使用更強大的 Regex 同時捕捉多種座標格式
-    // 格式包含: @25.123,121.123 或 !3d25.123!4d121.123
-    const regex = /(-?\d+\.\d+)[,!][34]?d?(-?\d+\.\d+)/;
-    const match = finalUrl.match(regex);
+    // 2. 如果網址沒座標，則讀取網頁源碼 (HTML Body) 搜尋
+    if (!match) {
+      const html = await response.text();
+      // 搜尋 HTML 中的 meta tags (og:image)、staticmap 連結或座標特徵
+      // 支援格式包含：ll=lat,lng / center=lat,lng / !3dlat!4dlng
+      const bodyRegex = /(-?\d+\.\d+)(?:,|%2C|!3d|!4d|ll=|center=)(-?\d+\.\d+)/;
+      match = html.match(bodyRegex);
+    }
 
     if (match) {
       const lat = match[1];
       const lng = match[2];
       
-      // 4. 重定向至 Apple Maps 協議
+      // 3. 輸出 Apple Maps 協議網址
       const appleMapsUrl = `http://maps.apple.com/?ll=${lat},${lng}&q=${lat},${lng}`;
       res.redirect(302, appleMapsUrl);
     } else {
-      res.status(404).send(`無法提取座標。解析後的網址為: ${finalUrl}`);
+      res.status(404).send(`無法提取座標。解析後的最終網址為: ${finalUrl}。請確認該地點在 Google Maps 上是否有精確位置。`);
     }
   } catch (err) {
     res.status(500).send('伺服器轉換失敗: ' + err.message);
