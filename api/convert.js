@@ -8,49 +8,53 @@ export default async function handler(req, res) {
     const response = await fetch(decodedUrl, {
       redirect: 'follow',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
       }
     });
 
     const finalUrl = response.url;
-    let lat, lng;
+    const html = await response.text();
+    
+    // 建立一個檢查並驗證座標的函數
+    const findCoords = (text) => {
+      // 匹配模式：!3d(緯度)!4d(經度) 或 @(緯度),(經度) 或 center=(緯度)%2C(經度)
+      const patterns = [
+        /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/,
+        /@(-?\d+\.\d+),(-?\d+\.\d+)/,
+        /center=(-?\d+\.\d+)(?:%2C|,)(-?\d+\.\d+)/,
+        /\[\[(-?\d+\.\d+),(-?\d+\.\d+)\]/ // 匹配 Google 內部 JSON 狀態
+      ];
 
-    // 1. 定義精確的提取函數
-    const extractFromText = (text) => {
-      // 優先找 Google 標準的 !3d 和 !4d
-      const googlePattern = /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/;
-      const atPattern = /@(-?\d+\.\d+),(-?\d+\.\d+)/;
-      
-      let m = text.match(googlePattern) || text.match(atPattern);
-      if (m) {
-        const tLat = parseFloat(m[1]);
-        const tLng = parseFloat(m[2]);
-        // 驗證是否在合理的地理範圍內
-        if (Math.abs(tLat) <= 90 && Math.abs(tLng) <= 180) {
-          return { lat: tLat, lng: tLng };
+      for (const pattern of patterns) {
+        const m = text.match(pattern);
+        if (m) {
+          const lat = parseFloat(m[1]);
+          const lng = parseFloat(m[2]);
+          if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && lat !== 0) {
+            return { lat, lng };
+          }
         }
       }
       return null;
     };
 
-    // 2. 從最終網址提取
-    let coords = extractFromText(finalUrl);
+    // 1. 先從最終網址找
+    let coords = findCoords(finalUrl);
 
-    // 3. 如果網址沒座標，下載 HTML 並搜尋 meta 標籤
+    // 2. 如果網址沒找到，從 HTML 內容找 (包含 meta 標籤與腳本)
     if (!coords) {
-      const html = await response.text();
-      // 在 HTML 中搜尋 og:image 或靜態地圖連結
-      coords = extractFromText(html);
+      coords = findCoords(html);
     }
 
     if (coords) {
-      // 確保使用精確的 Apple Maps 格式
-      const appleMapsUrl = `http://maps.apple.com/?ll=${coords.lat},${coords.lng}&q=${coords.lat},${coords.lng}`;
+      // 構建精確的 Apple Maps 網址
+      const appleMapsUrl = `https://maps.apple.com/?ll=${coords.lat},${coords.lng}&q=${coords.lat},${coords.lng}`;
       res.redirect(302, appleMapsUrl);
     } else {
-      res.status(404).send(`無法識別座標。解析後的網址為：${finalUrl}`);
+      res.status(404).send(`無法提取座標。解析後的網址：${finalUrl}。請確認 Google 連結是否包含具體地點。`);
     }
   } catch (err) {
-    res.status(500).send('伺服器轉換失敗: ' + err.message);
+    res.status(500).send('API 轉換出錯: ' + err.message);
   }
 }
