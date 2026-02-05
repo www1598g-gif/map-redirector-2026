@@ -12,29 +12,43 @@ export default async function handler(req, res) {
       }
     });
 
-    // 1. 優先檢查最終網址 (URL String) 是否包含座標
     const finalUrl = response.url;
-    const urlRegex = /(-?\d+\.\d+)[,!][34]?d?(-?\d+\.\d+)/;
-    let match = finalUrl.match(urlRegex);
+    let lat, lng;
 
-    // 2. 如果網址沒座標，則讀取網頁源碼 (HTML Body) 搜尋
-    if (!match) {
+    // 1. 定義精確的提取函數
+    const extractFromText = (text) => {
+      // 優先找 Google 標準的 !3d 和 !4d
+      const googlePattern = /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/;
+      const atPattern = /@(-?\d+\.\d+),(-?\d+\.\d+)/;
+      
+      let m = text.match(googlePattern) || text.match(atPattern);
+      if (m) {
+        const tLat = parseFloat(m[1]);
+        const tLng = parseFloat(m[2]);
+        // 驗證是否在合理的地理範圍內
+        if (Math.abs(tLat) <= 90 && Math.abs(tLng) <= 180) {
+          return { lat: tLat, lng: tLng };
+        }
+      }
+      return null;
+    };
+
+    // 2. 從最終網址提取
+    let coords = extractFromText(finalUrl);
+
+    // 3. 如果網址沒座標，下載 HTML 並搜尋 meta 標籤
+    if (!coords) {
       const html = await response.text();
-      // 搜尋 HTML 中的 meta tags (og:image)、staticmap 連結或座標特徵
-      // 支援格式包含：ll=lat,lng / center=lat,lng / !3dlat!4dlng
-      const bodyRegex = /(-?\d+\.\d+)(?:,|%2C|!3d|!4d|ll=|center=)(-?\d+\.\d+)/;
-      match = html.match(bodyRegex);
+      // 在 HTML 中搜尋 og:image 或靜態地圖連結
+      coords = extractFromText(html);
     }
 
-    if (match) {
-      const lat = match[1];
-      const lng = match[2];
-      
-      // 3. 輸出 Apple Maps 協議網址
-      const appleMapsUrl = `http://maps.apple.com/?ll=${lat},${lng}&q=${lat},${lng}`;
+    if (coords) {
+      // 確保使用精確的 Apple Maps 格式
+      const appleMapsUrl = `http://maps.apple.com/?ll=${coords.lat},${coords.lng}&q=${coords.lat},${coords.lng}`;
       res.redirect(302, appleMapsUrl);
     } else {
-      res.status(404).send(`無法提取座標。解析後的最終網址為: ${finalUrl}。請確認該地點在 Google Maps 上是否有精確位置。`);
+      res.status(404).send(`無法識別座標。解析後的網址為：${finalUrl}`);
     }
   } catch (err) {
     res.status(500).send('伺服器轉換失敗: ' + err.message);
