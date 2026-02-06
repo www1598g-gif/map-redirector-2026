@@ -11,45 +11,54 @@ module.exports = async (req, res) => {
 
     const finalUrl = response.url;
     const html = await response.text();
+    const urlObj = new URL(finalUrl);
     
-    // --- 1. 店名與全地址提取 (精密對齊) ---
-    let searchQuery;
-    // 瞄準 0x...:0x... 格式後面的第一個完整引號內容 (這是 Google 內部的 POI 全名)
+    // --- 1. 店名與全地址提取 (IC 級訊號採樣) ---
+    let fullQuery;
     const poiMatch = html.match(/"0x[0-9a-f]+:0x[0-9a-f]+","((?:[^"\\]|\\.)*?)"/);
     if (poiMatch && poiMatch[1]) {
-      // 處理 JSON 跳脫字元，還原完整的泰文店名
-      searchQuery = poiMatch[1].replace(/\\"/g, '"').replace(/\\u([0-9a-f]{4})/gi, (m, code) => 
+      fullQuery = poiMatch[1].replace(/\\"/g, '"').replace(/\\u([0-9a-f]{4})/gi, (m, code) => 
         String.fromCharCode(parseInt(code, 16))
       );
     }
 
-    // 備援：若 POI 匹配失敗，才改抓 link 參數
-    if (!searchQuery || searchQuery.includes('Google')) {
+    // --- 2. 【核心修正：訊號去噪】 ---
+    // 你說得對，地址會干擾 DDG。我們只抓「第一個空格或數字前」的內容當作店名搜尋
+    let searchQuery = fullQuery;
+    if (searchQuery) {
+      // 邏輯：泰文店名與地址之間通常有空格或門牌號碼開始（例如 86 หมู่ที่...）
+      // 我們切掉「空格+數字」之後的所有內容，只留純店名
+      searchQuery = searchQuery.split(/ (?=\d)| หมู่ที่|,/)[0].trim();
+    } else {
+      // 備援方案：從 URL 參數抓
       const linkQMatch = html.match(/[\?&]q=([^&" ]+)/);
-      if (linkQMatch) searchQuery = decodeURIComponent(linkQMatch[1].replace(/\+/g, ' '));
+      if (linkQMatch) searchQuery = decodeURIComponent(linkQMatch[1].replace(/\+/g, ' ')).split(/ (?=\d)/)[0];
     }
 
-    // --- 2. 座標補完：優先交給 DDG 校正 (解決歪掉的問題) ---
+    // 防呆：再次確認不是無效的通用標題
+    if (searchQuery && (searchQuery === 'Google Maps' || searchQuery === 'Google 地圖')) {
+      searchQuery = null;
+    }
+
+    // --- 3. DDG 搜尋與校正 (使用去噪後的純店名) ---
     let lat, lng;
-    if (searchQuery && !searchQuery.includes('Google')) {
+    if (searchQuery) {
       try {
-        // 使用剛才抓到的「เฮือนอุ้ย ที่พักแม่กำปอง」全名去搜尋
-        // 這是你實測 100% 準確的路徑
+        // 搜尋「เฮือนอุ้ย ที่พักแม่กำปอง」 -> 這會回傳正確的清邁座標
         const ddgRes = await fetch(`https://duckduckgo.com/local.js?q=${encodeURIComponent(searchQuery)}`);
         const ddgData = await ddgRes.json();
         if (ddgData.results?.[0]) {
           lat = ddgData.results[0].lat;
           lng = ddgData.results[0].lon;
-          // 用 DDG 的標準名稱更新標籤
-          if (ddgData.results[0].name) searchQuery = ddgData.results[0].name;
+          // 將店名更新為 DDG 認可的標準 POI 名稱
+          searchQuery = ddgData.results[0].name || searchQuery;
         }
       } catch (e) { console.error("DDG Calibration Failed"); }
     }
 
-    // --- 3. 輸出跳轉 (組合 Apple Maps 最佳參數) ---
+    // --- 4. 輸出跳轉 ---
     if (lat && lng && searchQuery) {
-      // 用 q 帶入全名，sll 帶入 DDG 座標作為搜尋錨點
-      // 這會讓 Apple Maps 像你手動搜尋一樣精準
+      // 最終輸出給 Apple Maps
       const appleMapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}&sll=${lat},${lng}`;
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.redirect(302, appleMapsUrl);
@@ -57,8 +66,8 @@ module.exports = async (req, res) => {
       return res.redirect(302, `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}`);
     }
 
-    res.status(404).send(`訊號解析失敗。最終網址：${finalUrl}`);
+    res.status(404).send(`解析失敗。最終網址：${finalUrl}`);
   } catch (err) {
-    res.status(500).send('API 失敗: ' + err.message);
+    res.status(500).send('API 執行失敗: ' + err.message);
   }
 };
