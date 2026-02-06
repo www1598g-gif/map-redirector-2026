@@ -13,45 +13,54 @@ module.exports = async (req, res) => {
     const html = await response.text();
     const urlObj = new URL(finalUrl);
     
-    // --- 1. 採樣原始訊號 ---
+    // --- 1. 原始訊號抓取 ---
     let fullQuery;
     const poiMatch = html.match(/"0x[0-9a-f]+:0x[0-9a-f]+","((?:[^"\\]|\\.)*?)"/);
     if (poiMatch && poiMatch[1]) {
       fullQuery = poiMatch[1].replace(/\\"/g, '"').replace(/\\u([0-9a-f]{4})/gi, (m, code) => 
         String.fromCharCode(parseInt(code, 16))
       );
+    } else {
+      const linkQMatch = html.match(/[\?&]q=([^&" ]+)/);
+      if (linkQMatch) fullQuery = decodeURIComponent(linkQMatch[1].replace(/\+/g, ' '));
     }
 
-    // --- 2. 【核心：店名去噪濾波器】 ---
+    // --- 2. 【核心修正：核心名稱提取器】 ---
     let searchQuery = fullQuery;
     if (searchQuery) {
-      // 步驟 A: 移除開頭的郵遞區號 (例如 306...)
-      searchQuery = searchQuery.replace(/^\d{3,5}\s*/, '');
-      
-      // 步驟 B: 在特定關鍵字處「切斷」，只取前半段最精華的店名
-      // 針對台灣：切除「縣/市/鎮/區」之後的冗餘
-      // 針對泰國：切除「หมู่ที่ / Rural Rd」之後的地址
-      const delimiters = / |หมู่ที่|新竹縣|關西鎮|縣|市|鎮|區|路|Rural Rd|,/;
-      searchQuery = searchQuery.split(delimiters)[0].trim();
+      // A. 先去掉郵遞區號 (例如 306)
+      searchQuery = searchQuery.replace(/^\d{3,5}/, '').trim();
+
+      // B. 移除行政區前綴 (例如：新竹縣關西鎮)
+      // 邏輯：移除「X縣X市」或「X鎮X區」等開頭字眼，直到看到馬武督咖啡廳
+      searchQuery = searchQuery.replace(/^(?:.{2,3}(?:縣|市))?.{2,3}(?:鎮|區|市|鄉|路)/, '').trim();
+
+      // C. 泰國/特殊地址處理：如果還有空格或泰文地址標籤，只拿第一個塊
+      const parts = searchQuery.split(/ |หมู่ที่|,|，/);
+      // 挑選第一個長度大於 2 的字串當核心名（避開空字元或殘留編號）
+      searchQuery = parts.find(p => p.length >= 2) || parts[0];
     }
 
-    // --- 3. DDG 校正 (使用純淨訊號) ---
+    // 防呆：再次確認抓到的不是無效的通用標題
+    if (searchQuery && (searchQuery.includes('Google Maps') || searchQuery.includes('Google 地圖'))) {
+      searchQuery = null;
+    }
+
+    // --- 3. DDG 校正 (使用純淨核心名稱) ---
     let lat, lng;
-    if (searchQuery && searchQuery !== 'Google Maps' && searchQuery !== 'Google 地圖') {
+    if (searchQuery) {
       try {
-        // 使用清洗後的「馬武督咖啡廳」或「เฮือนอุ้ย」
         const ddgRes = await fetch(`https://duckduckgo.com/local.js?q=${encodeURIComponent(searchQuery)}`);
         const ddgData = await ddgRes.json();
         if (ddgData.results?.[0]) {
           lat = ddgData.results[0].lat;
           lng = ddgData.results[0].lon;
-          // 更新為 DDG 標準名稱，讓 Apple Maps 插針標籤更專業
           searchQuery = ddgData.results[0].name || searchQuery;
         }
       } catch (e) { console.error("DDG Error"); }
     }
 
-    // --- 4. 輸出與快取 ---
+    // --- 4. 組合輸出 (sll 搜尋提示) ---
     if (lat && lng && searchQuery) {
       const appleMapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}&sll=${lat},${lng}`;
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
@@ -60,8 +69,8 @@ module.exports = async (req, res) => {
       return res.redirect(302, `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}`);
     }
 
-    res.status(404).send(`無法還原地標。最終地址：${fullQuery || finalUrl}`);
+    res.status(404).send(`無法還原。原始資料：${fullQuery}`);
   } catch (err) {
-    res.status(500).send('執行失敗: ' + err.message);
+    res.status(500).send('API 執行失敗: ' + err.message);
   }
 };
