@@ -12,28 +12,10 @@ module.exports = async (req, res) => {
     });
 
     const finalUrl = response.url;
-    const html = await response.text(); // 取得網頁原始碼以進行掃描
+    const html = await response.text(); // 為了處理 90% 網址沒座標的情況，必須讀取網頁內容
     const urlObj = new URL(finalUrl);
     
-    // 1. 抓座標 (增加 HTML 備援邏輯)
-    let lat, lng;
-    const urlCoordMatch = finalUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
-    
-    if (urlCoordMatch) {
-      // 優先從網址抓取
-      lat = urlCoordMatch[1];
-      lng = urlCoordMatch[2];
-    } else {
-      // 網址沒座標時，暴力掃描 HTML 內的 JSON 數據陣列
-      // 這是 Google Maps 初始狀態常用的座標封裝格式
-      const htmlCoordMatch = html.match(/\[null,null,(-?\d+\.\d+),(-?\d+\.\d+)\]/);
-      if (htmlCoordMatch) {
-        lat = htmlCoordMatch[1];
-        lng = htmlCoordMatch[2];
-      }
-    }
-    
-    // 2. 抓店名 (維持你的主邏輯)
+    // 1. 抓店名 (維持你的主邏輯，優先從 URL 提取)
     let searchQuery = urlObj.searchParams.get('q');
     if (!searchQuery) {
       const nameMatch = finalUrl.match(/\/(?:place|search)\/([^\/\?]+)/);
@@ -42,14 +24,30 @@ module.exports = async (req, res) => {
       }
     }
 
-    // 3. 組合 Apple Maps 連結 (綜合店名與座標)
+    // 2. 抓座標 (你的主邏輯：先從網址找)
+    let lat, lng;
+    const urlCoordMatch = finalUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+    
+    if (urlCoordMatch) {
+      lat = urlCoordMatch[1];
+      lng = urlCoordMatch[2];
+    } else {
+      // 3. 備援邏輯：如果網址沒座標（現在 9 成的情況），就從 HTML 裡暴力掃描
+      const htmlCoordMatch = html.match(/\[null,null,(-?\d+\.\d+),(-?\d+\.\d+)\]/);
+      if (htmlCoordMatch) {
+        lat = htmlCoordMatch[1];
+        lng = htmlCoordMatch[2];
+      }
+    }
+
+    // 4. 組合 Apple Maps 連結 (綜合店名與 GPS)
     let appleMapsUrl;
     if (lat && lng) {
-      // 綜合模式：ll 負責插針位置，q 負責顯示店名標籤
-      // 這樣就算 Apple Maps 圖資找不到店名，插針也會在 Google 給的精確座標上
+      // 綜合模式：ll 定位插針，q 負責顯示店名標籤
+      // 這能確保即便 Apple Maps 搜不到店名，也會導航到 Google 指定的那個點
       appleMapsUrl = `https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(searchQuery || '位置')}`;
     } else if (searchQuery) {
-      // 只有店名時的搜尋模式
+      // 沒座標時，退回純店名搜尋模式
       appleMapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}`;
     }
 
