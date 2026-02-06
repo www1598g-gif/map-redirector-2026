@@ -13,7 +13,7 @@ module.exports = async (req, res) => {
     const html = await response.text();
     const urlObj = new URL(finalUrl);
     
-    // --- 1. 店名與全地址提取 (IC 級訊號採樣) ---
+    // --- 1. 採樣原始訊號 ---
     let fullQuery;
     const poiMatch = html.match(/"0x[0-9a-f]+:0x[0-9a-f]+","((?:[^"\\]|\\.)*?)"/);
     if (poiMatch && poiMatch[1]) {
@@ -22,43 +22,37 @@ module.exports = async (req, res) => {
       );
     }
 
-    // --- 2. 【核心修正：訊號去噪】 ---
-    // 你說得對，地址會干擾 DDG。我們只抓「第一個空格或數字前」的內容當作店名搜尋
+    // --- 2. 【核心：店名去噪濾波器】 ---
     let searchQuery = fullQuery;
     if (searchQuery) {
-      // 邏輯：泰文店名與地址之間通常有空格或門牌號碼開始（例如 86 หมู่ที่...）
-      // 我們切掉「空格+數字」之後的所有內容，只留純店名
-      searchQuery = searchQuery.split(/ (?=\d)| หมู่ที่|,/)[0].trim();
-    } else {
-      // 備援方案：從 URL 參數抓
-      const linkQMatch = html.match(/[\?&]q=([^&" ]+)/);
-      if (linkQMatch) searchQuery = decodeURIComponent(linkQMatch[1].replace(/\+/g, ' ')).split(/ (?=\d)/)[0];
+      // 步驟 A: 移除開頭的郵遞區號 (例如 306...)
+      searchQuery = searchQuery.replace(/^\d{3,5}\s*/, '');
+      
+      // 步驟 B: 在特定關鍵字處「切斷」，只取前半段最精華的店名
+      // 針對台灣：切除「縣/市/鎮/區」之後的冗餘
+      // 針對泰國：切除「หมู่ที่ / Rural Rd」之後的地址
+      const delimiters = / |หมู่ที่|新竹縣|關西鎮|縣|市|鎮|區|路|Rural Rd|,/;
+      searchQuery = searchQuery.split(delimiters)[0].trim();
     }
 
-    // 防呆：再次確認不是無效的通用標題
-    if (searchQuery && (searchQuery === 'Google Maps' || searchQuery === 'Google 地圖')) {
-      searchQuery = null;
-    }
-
-    // --- 3. DDG 搜尋與校正 (使用去噪後的純店名) ---
+    // --- 3. DDG 校正 (使用純淨訊號) ---
     let lat, lng;
-    if (searchQuery) {
+    if (searchQuery && searchQuery !== 'Google Maps' && searchQuery !== 'Google 地圖') {
       try {
-        // 搜尋「เฮือนอุ้ย ที่พักแม่กำปอง」 -> 這會回傳正確的清邁座標
+        // 使用清洗後的「馬武督咖啡廳」或「เฮือนอุ้ย」
         const ddgRes = await fetch(`https://duckduckgo.com/local.js?q=${encodeURIComponent(searchQuery)}`);
         const ddgData = await ddgRes.json();
         if (ddgData.results?.[0]) {
           lat = ddgData.results[0].lat;
           lng = ddgData.results[0].lon;
-          // 將店名更新為 DDG 認可的標準 POI 名稱
+          // 更新為 DDG 標準名稱，讓 Apple Maps 插針標籤更專業
           searchQuery = ddgData.results[0].name || searchQuery;
         }
-      } catch (e) { console.error("DDG Calibration Failed"); }
+      } catch (e) { console.error("DDG Error"); }
     }
 
-    // --- 4. 輸出跳轉 ---
+    // --- 4. 輸出與快取 ---
     if (lat && lng && searchQuery) {
-      // 最終輸出給 Apple Maps
       const appleMapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}&sll=${lat},${lng}`;
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.redirect(302, appleMapsUrl);
@@ -66,8 +60,8 @@ module.exports = async (req, res) => {
       return res.redirect(302, `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}`);
     }
 
-    res.status(404).send(`解析失敗。最終網址：${finalUrl}`);
+    res.status(404).send(`無法還原地標。最終地址：${fullQuery || finalUrl}`);
   } catch (err) {
-    res.status(500).send('API 執行失敗: ' + err.message);
+    res.status(500).send('執行失敗: ' + err.message);
   }
 };
