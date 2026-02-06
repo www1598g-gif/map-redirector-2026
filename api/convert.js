@@ -13,61 +13,59 @@ module.exports = async (req, res) => {
     const html = await response.text();
     const urlObj = new URL(finalUrl);
     
-    // --- 1. 店名提取 (濾除雜訊並深挖訊號) ---
+    // --- 1. 店名與全地址提取 (核心優化) ---
     let searchQuery = urlObj.searchParams.get('q');
     
-    // 如果 URL 沒參數，或是參數是無效的 "Google Maps"
+    // 如果 URL 沒參數，直接從 HTML 的初始化狀態 JSON 陣列中硬挖全名
     if (!searchQuery || searchQuery.includes('Google')) {
-      // (1) 核心修正：從 HTML 內部的 link 參數深挖真正的地點訊息 (解決清邁連結的關鍵)
-      const deepQMatch = html.match(/[\?&]q=([^&" ]+)/);
-      if (deepQMatch) {
-        searchQuery = decodeURIComponent(deepQMatch[1].replace(/\+/g, ' '));
-      }
-
-      // (2) 備援：從初始化狀態 JSON 抓取全名
-      if (!searchQuery || searchQuery.includes('Google')) {
-        const initStateMatch = html.match(/window\.APP_INITIALIZATION_STATE=\[\[\[.*?\],\[.*?\],\[.*?\],.*?\],\[\[\["(.*?)",/);
-        if (initStateMatch) searchQuery = initStateMatch[1];
+      // 這個 Regex 專門對準 Google Maps 內部儲存地點名稱與地址的 JS 位置
+      const fullInfoMatch = html.match(/window\.APP_INITIALIZATION_STATE=\[\[\[.*?\],\[.*?\],\[.*?\],.*?\],\[\[\["(.*?)",/);
+      if (fullInfoMatch && fullInfoMatch[1]) {
+        searchQuery = fullInfoMatch[1]; // 這裡會拿到最完整的：店名 + 詳細地址
+      } else {
+        // 備援：從 link 標籤的 q 參數挖
+        const deepQMatch = html.match(/[\?&]q=([^&" ]+)/);
+        if (deepQMatch) searchQuery = decodeURIComponent(deepQMatch[1].replace(/\+/g, ' '));
       }
     }
 
-    // 再次確認 searchQuery 不是無效字眼，否則會導致 DDG 搜尋偏向台中
+    // 再次確認不是無效字眼
     if (searchQuery && (searchQuery.includes('Google Maps') || searchQuery.includes('Google 地圖'))) {
       searchQuery = null;
     }
 
-    // --- 2. 座標補完：DDG 校正 ---
-    const coordMatch = finalUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+    // --- 2. 座標補完：DDG 校正 (使用全名搜尋) ---
     let lat, lng;
-
-    if (coordMatch) {
-      [_, lat, lng] = coordMatch;
+    const urlCoordMatch = finalUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+    
+    if (urlCoordMatch) {
+      [_, lat, lng] = urlCoordMatch;
     } else if (searchQuery) {
       try {
-        // 拿這串長長的泰文/清邁地址去問 DDG
+        // 使用剛才抓到的「完整店名+地址」去問 DDG
         const ddgRes = await fetch(`https://duckduckgo.com/local.js?q=${encodeURIComponent(searchQuery)}`);
         const ddgData = await ddgRes.json();
         if (ddgData.results?.[0]) {
           lat = ddgData.results[0].lat;
           lng = ddgData.results[0].lon;
-          // 若 DDG 有精確名稱，更新標籤名稱
+          // 若 DDG 有更精確的名稱，更新它
           if (ddgData.results[0].name) searchQuery = ddgData.results[0].name;
         }
-      } catch (e) { console.error("DDG Calibration Failed"); }
+      } catch (e) { console.error("DDG Error"); }
     }
 
-    // --- 3. 輸出跳轉 ---
-    if (lat && lng) {
-      // ll 負責精確定位，q 負責在 Apple Maps 顯示店名
-      const appleMapsUrl = `https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(searchQuery || '位置')}`;
+    // --- 3. 輸出跳轉 (改用搜尋提示 sll) ---
+    if (lat && lng && searchQuery) {
+      // sll 告訴 Apple Maps「就在清邁這附近找這串全名」
+      const appleMapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}&sll=${lat},${lng}`;
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.redirect(302, appleMapsUrl);
     } else if (searchQuery) {
       return res.redirect(302, `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}`);
     }
 
-    res.status(404).send(`無法解析。最終網址：${finalUrl}`);
+    res.status(404).send(`無法解析地點。最終網址：${finalUrl}`);
   } catch (err) {
-    res.status(500).send('執行失敗: ' + err.message);
+    res.status(500).send('API 錯誤: ' + err.message);
   }
 };
