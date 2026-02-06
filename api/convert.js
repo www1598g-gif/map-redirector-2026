@@ -11,8 +11,9 @@ module.exports = async (req, res) => {
 
     const finalUrl = response.url;
     const html = await response.text();
+    const urlObj = new URL(finalUrl);
     
-    // --- 1. 抓取原始全名 (解決 ID 型連結) ---
+    // --- 1. 抓取原始訊號 (POI 名稱) ---
     let fullQuery;
     const poiMatch = html.match(/"0x[0-9a-f]+:0x[0-9a-f]+","((?:[^"\\]|\\.)*?)"/);
     if (poiMatch && poiMatch[1]) {
@@ -24,27 +25,27 @@ module.exports = async (req, res) => {
       if (linkQMatch) fullQuery = decodeURIComponent(linkQMatch[1].replace(/\+/g, ' '));
     }
 
-    // --- 2. 【核心修正：極簡濾波器】 ---
+    // --- 2. 【核心修正：店名精確提取器】 ---
     let searchQuery = fullQuery;
     if (searchQuery) {
-      // A. 移除開頭可能有的郵遞區號 (3~5位數字)
-      searchQuery = searchQuery.replace(/^\d{3,5}/, '').trim();
+      // Step A: 移除開頭的郵遞區號 (例如 306)
+      searchQuery = searchQuery.replace(/^\d{3,5}/, '');
 
-      // B. 關鍵：在「空格+數字」或「逗號」處切斷
-      // 為什麼？因為店名後通常跟著門牌號碼或郵遞區號（例如：馬武督咖啡廳 306... 或 Heuan Ui 86...）
-      // 我們只取第一個長度足夠的片段
-      const parts = searchQuery.split(/ (?=\d)|,|，|หมู่ที่/);
-      searchQuery = parts[0].trim();
+      // Step B: 移除台灣行政區前綴 (解決馬武督咖啡廳的關鍵)
+      // 邏輯：從字串開頭匹配「XX縣/市」加上「XX鎮/區/鄉/市」，若匹配成功則移除
+      const cleanName = searchQuery.replace(/^.*? (?:縣|市|鎮|區|鄉|里|鄰)/, '');
+      // 如果移除後剩下的長度大於 2 (避免剩下一兩個字)，就採用去噪後的店名
+      if (cleanName.length > 2) {
+        searchQuery = cleanName;
+      }
+
+      // Step C: 處理泰國或其他有空格的格式，只拿第一段最精華名稱 (解決 Heuan Ui)
+      searchQuery = searchQuery.split(/ |หมู่ที่|,|，/)[0].trim();
     }
 
-    // 防呆：確保不是無效字眼
-    if (searchQuery && (searchQuery.includes('Google Maps') || searchQuery.includes('Google 地圖'))) {
-      searchQuery = null;
-    }
-
-    // --- 3. DDG 校正 (用最乾淨的店名換座標) ---
+    // --- 3. DDG 精確校正 (如圖 image_65f428.png) ---
     let lat, lng;
-    if (searchQuery) {
+    if (searchQuery && !searchQuery.includes('Google')) {
       try {
         const ddgRes = await fetch(`https://duckduckgo.com/local.js?q=${encodeURIComponent(searchQuery)}`);
         const ddgData = await ddgRes.json();
@@ -56,9 +57,9 @@ module.exports = async (req, res) => {
       } catch (e) { console.error("DDG Error"); }
     }
 
-    // --- 4. 輸出跳轉 (帶上 sll 避免搜尋飄移) ---
+    // --- 4. 組合 Apple Maps 最佳參數 (sll 搜尋提示座標) ---
     if (lat && lng && searchQuery) {
-      // sll 讓 Apple Maps 在座標附近找這家店，準確度最高
+      // 帶上 sll 座標讓 Apple Maps 在關西或清邁區域精確吸附 POI
       const appleMapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}&sll=${lat},${lng}`;
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.redirect(302, appleMapsUrl);
@@ -66,8 +67,8 @@ module.exports = async (req, res) => {
       return res.redirect(302, `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}`);
     }
 
-    res.status(404).send(`無法還原。地址：${fullQuery}`);
+    res.status(404).send(`解析失敗。原始地址：${fullQuery || finalUrl}`);
   } catch (err) {
-    res.status(500).send('執行失敗: ' + err.message);
+    res.status(500).send('API Error: ' + err.message);
   }
 };
