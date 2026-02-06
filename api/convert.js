@@ -13,51 +13,44 @@ module.exports = async (req, res) => {
     const html = await response.text();
     const urlObj = new URL(finalUrl);
     
-    // --- 1. 店名提取：多重感測器邏輯 ---
+    // --- 1. 店名提取 (濾除雜訊並深挖訊號) ---
     let searchQuery = urlObj.searchParams.get('q');
     
-    // 如果 URL 沒參數，或是參數只有通用的 "Google Maps"
-    if (!searchQuery || searchQuery === 'Google Maps' || searchQuery === 'Google 地圖') {
-      // (1) 嘗試從網址路徑提取
-      const nameMatch = finalUrl.match(/\/(?:place|search)\/([^\/\?]+)/);
-      if (nameMatch) {
-        searchQuery = decodeURIComponent(nameMatch[1].replace(/\+/g, ' '));
-      } else {
-        // (2) 核心修正：從 HTML 原始碼中強行抓取內部傳輸用的 q 參數
-        // 這能解決你提供的 6eugLJo4 這種黑箱網址
-        const internalQMatch = html.match(/[\?&]q=([^&" ]+)/);
-        if (internalQMatch) {
-          searchQuery = decodeURIComponent(internalQMatch[1].replace(/\+/g, ' '));
-        }
+    // 如果 URL 沒參數，或是參數是無效的 "Google Maps"
+    if (!searchQuery || searchQuery.includes('Google')) {
+      // (1) 核心修正：從 HTML 內部的 link 參數深挖真正的地點訊息 (解決清邁連結的關鍵)
+      const deepQMatch = html.match(/[\?&]q=([^&" ]+)/);
+      if (deepQMatch) {
+        searchQuery = decodeURIComponent(deepQMatch[1].replace(/\+/g, ' '));
+      }
 
-        // (3) 備援：如果上述都失敗，才掃描 metadata
-        if (!searchQuery || searchQuery.includes('Google Maps')) {
-          const ogTitle = html.match(/property="og:title" content="(.*?)"/);
-          const rawTitle = html.match(/<title>(.*?)<\/title>/i);
-          let extractedTitle = ogTitle ? ogTitle[1] : (rawTitle ? rawTitle[1] : null);
-
-          if (extractedTitle && !extractedTitle.includes('Google Maps') && !extractedTitle.includes('Google 地圖')) {
-            searchQuery = extractedTitle.replace(/\s*[-–—]\s*Google\s*(?:Maps|地圖).*/i, '').trim();
-          }
-        }
+      // (2) 備援：從初始化狀態 JSON 抓取全名
+      if (!searchQuery || searchQuery.includes('Google')) {
+        const initStateMatch = html.match(/window\.APP_INITIALIZATION_STATE=\[\[\[.*?\],\[.*?\],\[.*?\],.*?\],\[\[\["(.*?)",/);
+        if (initStateMatch) searchQuery = initStateMatch[1];
       }
     }
 
+    // 再次確認 searchQuery 不是無效字眼，否則會導致 DDG 搜尋偏向台中
+    if (searchQuery && (searchQuery.includes('Google Maps') || searchQuery.includes('Google 地圖'))) {
+      searchQuery = null;
+    }
+
     // --- 2. 座標補完：DDG 校正 ---
-    // 注意：HTML 內出現的座標通常是「目前預覽位置」，不可直接使用
     const coordMatch = finalUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
     let lat, lng;
 
     if (coordMatch) {
       [_, lat, lng] = coordMatch;
-    } else if (searchQuery && searchQuery !== 'Google Maps' && searchQuery !== 'Google 地圖') {
+    } else if (searchQuery) {
       try {
-        // 拿抓到的「真店名」去問 DuckDuckGo
+        // 拿這串長長的泰文/清邁地址去問 DDG
         const ddgRes = await fetch(`https://duckduckgo.com/local.js?q=${encodeURIComponent(searchQuery)}`);
         const ddgData = await ddgRes.json();
         if (ddgData.results?.[0]) {
           lat = ddgData.results[0].lat;
           lng = ddgData.results[0].lon;
+          // 若 DDG 有精確名稱，更新標籤名稱
           if (ddgData.results[0].name) searchQuery = ddgData.results[0].name;
         }
       } catch (e) { console.error("DDG Calibration Failed"); }
@@ -65,10 +58,11 @@ module.exports = async (req, res) => {
 
     // --- 3. 輸出跳轉 ---
     if (lat && lng) {
+      // ll 負責精確定位，q 負責在 Apple Maps 顯示店名
       const appleMapsUrl = `https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(searchQuery || '位置')}`;
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.redirect(302, appleMapsUrl);
-    } else if (searchQuery && searchQuery !== 'Google Maps' && searchQuery !== 'Google 地圖') {
+    } else if (searchQuery) {
       return res.redirect(302, `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}`);
     }
 
