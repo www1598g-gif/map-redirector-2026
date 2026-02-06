@@ -16,35 +16,43 @@ module.exports = async (req, res) => {
     // --- 1. 店名提取：多重感測器邏輯 ---
     let searchQuery = urlObj.searchParams.get('q');
     
-    if (!searchQuery) {
+    // 如果 URL 沒參數，或是參數只有通用的 "Google Maps"
+    if (!searchQuery || searchQuery === 'Google Maps' || searchQuery === 'Google 地圖') {
       // (1) 嘗試從網址路徑提取
       const nameMatch = finalUrl.match(/\/(?:place|search)\/([^\/\?]+)/);
       if (nameMatch) {
         searchQuery = decodeURIComponent(nameMatch[1].replace(/\+/g, ' '));
       } else {
-        // (2) 網址沒訊號，啟動 HTML 深度掃描
-        // 同時檢查 og:title, twitter:title 以及 <title> 標籤
-        const ogTitle = html.match(/property="og:title" content="(.*?)"/);
-        const twTitle = html.match(/name="twitter:title" content="(.*?)"/);
-        const rawTitle = html.match(/<title>(.*?)<\/title>/i);
+        // (2) 核心修正：從 HTML 原始碼中強行抓取內部傳輸用的 q 參數
+        // 這能解決你提供的 6eugLJo4 這種黑箱網址
+        const internalQMatch = html.match(/[\?&]q=([^&" ]+)/);
+        if (internalQMatch) {
+          searchQuery = decodeURIComponent(internalQMatch[1].replace(/\+/g, ' '));
+        }
 
-        let extractedTitle = ogTitle ? ogTitle[1] : (twTitle ? twTitle[1] : (rawTitle ? rawTitle[1] : null));
+        // (3) 備援：如果上述都失敗，才掃描 metadata
+        if (!searchQuery || searchQuery.includes('Google Maps')) {
+          const ogTitle = html.match(/property="og:title" content="(.*?)"/);
+          const rawTitle = html.match(/<title>(.*?)<\/title>/i);
+          let extractedTitle = ogTitle ? ogTitle[1] : (rawTitle ? rawTitle[1] : null);
 
-        if (extractedTitle) {
-          // 去除「 - Google Maps」或「 - Google 地圖」等後綴雜訊
-          searchQuery = extractedTitle.replace(/\s*[-–—]\s*Google\s*(?:Maps|地圖).*/i, '').trim();
+          if (extractedTitle && !extractedTitle.includes('Google Maps') && !extractedTitle.includes('Google 地圖')) {
+            searchQuery = extractedTitle.replace(/\s*[-–—]\s*Google\s*(?:Maps|地圖).*/i, '').trim();
+          }
         }
       }
     }
 
-    // --- 2. 座標補完：DDG 校正 (維持你的主邏輯) ---
+    // --- 2. 座標補完：DDG 校正 ---
+    // 注意：HTML 內出現的座標通常是「目前預覽位置」，不可直接使用
     const coordMatch = finalUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
     let lat, lng;
+
     if (coordMatch) {
       [_, lat, lng] = coordMatch;
-    } else if (searchQuery && searchQuery !== 'Google Maps') {
+    } else if (searchQuery && searchQuery !== 'Google Maps' && searchQuery !== 'Google 地圖') {
       try {
-        // 使用 DuckDuckGo (DDG) 換取 Apple Maps 等級的精確座標
+        // 拿抓到的「真店名」去問 DuckDuckGo
         const ddgRes = await fetch(`https://duckduckgo.com/local.js?q=${encodeURIComponent(searchQuery)}`);
         const ddgData = await ddgRes.json();
         if (ddgData.results?.[0]) {
@@ -60,7 +68,7 @@ module.exports = async (req, res) => {
       const appleMapsUrl = `https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(searchQuery || '位置')}`;
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.redirect(302, appleMapsUrl);
-    } else if (searchQuery) {
+    } else if (searchQuery && searchQuery !== 'Google Maps' && searchQuery !== 'Google 地圖') {
       return res.redirect(302, `https://maps.apple.com/?q=${encodeURIComponent(searchQuery)}`);
     }
 
